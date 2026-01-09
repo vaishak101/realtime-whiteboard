@@ -19,13 +19,19 @@ app.use(cors());
 app.use(express.json());
 
 // WebSocket events
+// WebSocket events
 io.on('connection', (socket) => {
   console.log('✅ Client connected:', socket.id);
 
-  // Listen for draw events
+  // When client draws, broadcast to ALL others
   socket.on('draw-event', (data) => {
-    console.log('🎨 Draw event received:', data);
-    // TODO: Broadcast to others (later)
+    console.log('🎨 Draw event from:', socket.id, data);
+    
+    // Broadcast to everyone EXCEPT sender
+    socket.broadcast.emit('remote-draw', {
+      ...data,
+      socketId: socket.id // So we know who drew it
+    });
   });
 
   socket.on('disconnect', () => {

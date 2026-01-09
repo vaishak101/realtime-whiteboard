@@ -18,19 +18,44 @@ const io = new Server(httpServer, {
 app.use(cors());
 app.use(express.json());
 
-// WebSocket events
-// WebSocket events
+// WebSocket events - Handle Fabric.js object operations
 io.on('connection', (socket) => {
   console.log('✅ Client connected:', socket.id);
 
-  // When client draws, broadcast to ALL others
-  socket.on('draw-event', (data) => {
-    console.log('🎨 Draw event from:', socket.id, data);
+  // When client adds an object, broadcast to ALL others
+  socket.on('object-added', (data) => {
+    console.log('➕ Object added from:', socket.id);
     
     // Broadcast to everyone EXCEPT sender
-    socket.broadcast.emit('remote-draw', {
-      ...data,
-      socketId: socket.id // So we know who drew it
+    socket.broadcast.emit('remote-object-added', {
+      object: data.object,
+      socketId: socket.id,
+      timestamp: data.timestamp
+    });
+  });
+
+  // When client modifies an object, broadcast to ALL others
+  socket.on('object-modified', (data) => {
+    console.log('✏️ Object modified from:', socket.id, 'ID:', data.id);
+    
+    // Broadcast to everyone EXCEPT sender
+    socket.broadcast.emit('remote-object-modified', {
+      id: data.id,
+      object: data.object,
+      socketId: socket.id,
+      timestamp: data.timestamp
+    });
+  });
+
+  // When client removes an object, broadcast to ALL others
+  socket.on('object-removed', (data) => {
+    console.log('🗑️ Object removed from:', socket.id, 'ID:', data.id);
+    
+    // Broadcast to everyone EXCEPT sender
+    socket.broadcast.emit('remote-object-removed', {
+      id: data.id,
+      socketId: socket.id,
+      timestamp: data.timestamp
     });
   });
 

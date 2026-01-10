@@ -1,290 +1,280 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import * as fabric from 'fabric';
+import  * as fabric from 'fabric';
 import { Socket } from 'socket.io-client';
 
 interface CanvasProps {
   socket: Socket | null;
 }
 
-interface RemoteObject {
-  id: string;
-  socketId: string;
-  object: any;
-}
-
 export default function Canvas({ socket }: CanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
-  const isLocalChange = useRef(false);
-  const remoteObjects = useRef<Map<string, RemoteObject>>(new Map());
-  const [drawingMode, setDrawingMode] = useState<'select' | 'pen' | 'eraser'>('select');
+  const localObjectIds = useRef<Set<string>>(new Set());
+  const remoteObjects = useRef<Map<string, any>>(new Map());
+  const [mode, setMode] = useState<'pen' | 'eraser' | 'select'>('pen');
+  const eraserCursorRef = useRef<fabric.Circle | null>(null);
 
-  // Initialize Fabric.js canvas
+  // Initialize canvas
   useEffect(() => {
     if (!canvasRef.current) return;
 
-    const fabricCanvas = new fabric.Canvas(canvasRef.current, {
+    const canvas = new fabric.Canvas(canvasRef.current, {
       width: 800,
       height: 600,
-      backgroundColor: 'white',
-      selection: true,
-      preserveObjectStacking: true,
+      backgroundColor: '#ffffff',
+      isDrawingMode: true,
     });
 
-    fabricCanvasRef.current = fabricCanvas;
+    // Setup default pen brush
+    const brush = new fabric.PencilBrush(canvas);
+    brush.color = '#000000';
+    brush.width = 3;
+    canvas.freeDrawingBrush = brush;
 
+    fabricCanvasRef.current = canvas;
     console.log('✅ Canvas initialized');
 
-    return () => {
-      fabricCanvas.dispose();
-    };
+    return () => canvas.dispose();
   }, []);
 
-  // Handle drawing mode changes
+  // Handle mode changes
   useEffect(() => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas) return;
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
 
-    if (drawingMode === 'pen') {
-      fabricCanvas.isDrawingMode = true;
-      const brush = new fabric.PencilBrush(fabricCanvas);
+    // Remove eraser cursor if it exists
+    if (eraserCursorRef.current) {
+      canvas.remove(eraserCursorRef.current);
+      eraserCursorRef.current = null;
+    }
+
+    if (mode === 'pen') {
+      canvas.isDrawingMode = true;
+      canvas.selection = false;
+      const brush = new fabric.PencilBrush(canvas);
       brush.color = '#000000';
       brush.width = 3;
-      fabricCanvas.freeDrawingBrush = brush;
-      fabricCanvas.selection = false;
-    } else if (drawingMode === 'eraser') {
-      fabricCanvas.isDrawingMode = true;
-      const brush = new fabric.PencilBrush(fabricCanvas);
-      brush.color = '#FFFFFF';
-      brush.width = 20;
-      fabricCanvas.freeDrawingBrush = brush;
-      fabricCanvas.selection = false;
-    } else {
-      fabricCanvas.isDrawingMode = false;
-      fabricCanvas.selection = true;
-    }
-    fabricCanvas.renderAll();
-  }, [drawingMode]);
-
-  // Handle PATH CREATED (for pen/eraser drawing)
-  useEffect(() => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas || !socket) return;
-
-    const handlePathCreated = (e: any) => {
-      if (!e.path) return;
-
-      const path = e.path as any;
-      path.id = `path-${Date.now()}-${Math.random()}`;
+      canvas.freeDrawingBrush = brush;
+      console.log('✏️ Pen mode');
+    } else if (mode === 'eraser') {
+      canvas.isDrawingMode = false;
+      canvas.selection = false;
       
-      console.log('🎨 Path created locally:', path.id);
-
-      // Mark as local to prevent object:added from double-emitting
-      isLocalChange.current = true;
-
-      const serialized = path.toJSON(['id']);
-      socket.emit('object-added', {
-        object: serialized,
-        timestamp: Date.now(),
+      // Create eraser cursor (visual indicator)
+      const eraserCursor = new fabric.Circle({
+        radius: 10,
+        fill: 'rgba(255, 0, 0, 0.3)',
+        stroke: '#ff0000',
+        strokeWidth: 2,
+        selectable: false,
+        evented: false,
+        originX: 'center',
+        originY: 'center',
       });
+      
+      canvas.add(eraserCursor);
+      eraserCursorRef.current = eraserCursor;
+      
+      console.log('🗑️ Eraser mode');
+    } else {
+      canvas.isDrawingMode = false;
+      canvas.selection = true;
+      console.log('👆 Selection mode');
+    }
+    
+    canvas.renderAll();
+  }, [mode]);
 
-      // Reset flag after a tick (let object:added handler run first)
-      setTimeout(() => {
-        isLocalChange.current = false;
-      }, 0);
-    };
-
-    fabricCanvas.on('path:created', handlePathCreated);
-
-    return () => {
-      fabricCanvas.off('path:created', handlePathCreated);
-    };
-  }, [socket]);
-
-  // Handle OBJECT ADDED (for shapes like rectangles/circles)
+  // Eraser: delete objects on mouse move
   useEffect(() => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas || !socket) return;
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || mode !== 'eraser') return;
 
-    const handleObjectAdded = (e: any) => {
-      if (!e.target) return;
-
-      const object = e.target as any;
-
-      // Skip if this is a path (paths are handled by path:created event)
-      if (object.type === 'path') {
-        console.log('⏭️ Skipping object:added (path handled separately):', object.id);
-        return;
-      }
-
-      // Skip if this is a local change (shape added)
-      if (isLocalChange.current) {
-        console.log('⏭️ Skipping object:added (local change):', object.id);
-        return;
-      }
-
-      // Skip if object already has an ID (already processed)
-      if (object.id) {
-        console.log('⏭️ Skipping object:added (already has ID):', object.id);
-        return;
-      }
-
-      // This shouldn't happen, but just in case
-      object.id = `obj-${Date.now()}-${Math.random()}`;
-      console.log('🎨 Object added (fallback):', object.id);
-
-      const serialized = object.toJSON(['id']);
-      socket.emit('object-added', {
-        object: serialized,
-        timestamp: Date.now(),
-      });
-    };
-
-    fabricCanvas.on('object:added', handleObjectAdded);
-
-    return () => {
-      fabricCanvas.off('object:added', handleObjectAdded);
-    };
-  }, [socket]);
-
-  // Handle OBJECT MODIFIED
-  useEffect(() => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas || !socket) return;
-
-    const handleObjectModified = (e: any) => {
-      if (!e.target || isLocalChange.current) return;
-
-      const object = e.target as any;
-      console.log('✏️ Object modified:', object.id);
-
-      const serialized = object.toJSON(['id']);
-      socket.emit('object-modified', {
-        id: object.id,
-        object: serialized,
-        timestamp: Date.now(),
-      });
-    };
-
-    fabricCanvas.on('object:modified', handleObjectModified);
-
-    return () => {
-      fabricCanvas.off('object:modified', handleObjectModified);
-    };
-  }, [socket]);
-
-  // Handle DELETE key
-  useEffect(() => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas || !socket) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.key === 'Delete' || event.key === 'Backspace')) {
-        const activeObject = fabricCanvas.getActiveObject() as any;
-        if (activeObject && activeObject.id) {
-          console.log('🗑️ Deleting object:', activeObject.id);
-          
-          socket.emit('object-removed', {
-            id: activeObject.id,
-            timestamp: Date.now(),
-          });
-          
-          isLocalChange.current = true;
-          fabricCanvas.remove(activeObject);
-          fabricCanvas.renderAll();
-          
-          setTimeout(() => {
-            isLocalChange.current = false;
-          }, 0);
-        }
+    const handleMouseMove = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+      
+      // Move eraser cursor
+      if (eraserCursorRef.current) {
+        eraserCursorRef.current.set({
+          left: pointer.x,
+          top: pointer.y,
+        });
+        canvas.renderAll();
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [socket]);
-
-  // Listen for REMOTE object additions
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleRemoteObjectAdded = async (data: { 
-      object: any; 
-      socketId: string; 
-      timestamp: number 
-    }) => {
-      const fabricCanvas = fabricCanvasRef.current;
-      if (!fabricCanvas) return;
-
-      console.log('👥 Remote object received:', data.object.id);
-
-      try {
-        isLocalChange.current = true;
-
-        const objects = await fabric.util.enlivenObjects([data.object]);
-        if (objects.length > 0) {
-          const obj = objects[0] as any;
+    const handleMouseDown = (e: any) => {
+      const pointer = canvas.getPointer(e.e);
+      
+      // Find objects under the eraser
+      const objects = canvas.getObjects();
+      for (const obj of objects) {
+        const objWithId = obj as any;
+        
+        // Skip the eraser cursor itself
+        if (obj === eraserCursorRef.current) continue;
+        
+        // Check if pointer is inside this object
+        if (obj.containsPoint(pointer)) {
+          console.log('🗑️ Erasing object:', objWithId.id);
+          console.log('🗑️ Is local?', localObjectIds.current.has(objWithId.id));
+          console.log('🗑️ Is remote?', remoteObjects.current.has(objWithId.id));
+          console.log('🗑️ Socket connected?', socket?.connected);
           
-          // Keep paths selectable, disable other remote objects
-          if (obj.type === 'path') {
-            obj.selectable = true;
-            obj.evented = true;
-          } else {
-            obj.selectable = false;
-            obj.evented = false;
+          // Remove from canvas
+          canvas.remove(obj);
+          
+          // Always emit deletion if object has an ID and socket is connected
+          if (objWithId.id && socket?.connected) {
+            console.log('🗑️ Emitting object-removed:', objWithId.id);
+            socket.emit('object-removed', {
+              id: objWithId.id,
+              timestamp: Date.now(),
+            });
+            
+            // Clean up tracking
+            localObjectIds.current.delete(objWithId.id);
+            remoteObjects.current.delete(objWithId.id);
           }
           
-          fabricCanvas.add(obj);
-          fabricCanvas.renderAll();
-          
-          remoteObjects.current.set(obj.id, {
-            id: obj.id,
-            socketId: data.socketId,
-            object: obj,
-          });
+          canvas.renderAll();
+          break; // Only erase one object per click
         }
-
-        setTimeout(() => {
-          isLocalChange.current = false;
-        }, 0);
-      } catch (error) {
-        console.error('❌ Error adding remote object:', error);
-        isLocalChange.current = false;
       }
     };
 
-    socket.on('remote-object-added', handleRemoteObjectAdded);
+    canvas.on('mouse:move', handleMouseMove);
+    canvas.on('mouse:down', handleMouseDown);
 
     return () => {
-      socket.off('remote-object-added', handleRemoteObjectAdded);
+      canvas.off('mouse:move', handleMouseMove);
+      canvas.off('mouse:down', handleMouseDown);
     };
+  }, [mode, socket]);
+
+  // Handle path creation (pen drawing)
+  useEffect(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !socket) return;
+
+    const handlePathCreated = (e: any) => {
+      const path = e.path;
+      if (!path) return;
+
+      // Only handle pen strokes (eraser mode doesn't create paths anymore)
+      if (mode !== 'pen') return;
+
+      // Give it a unique ID
+      const pathId = `path-${Date.now()}-${Math.random()}`;
+      path.id = pathId;
+      
+      console.log('✏️ Drawing created:', pathId);
+      
+      // Remember this is ours
+      localObjectIds.current.add(pathId);
+
+      // Send to server - IMPORTANT: include 'id' in custom properties
+      const pathData = path.toObject(['id']);
+      console.log('📤 Sending path data with ID:', pathData.id);
+      
+      socket.emit('object-added', {
+        object: pathData,
+        timestamp: Date.now(),
+      });
+    };
+
+    canvas.on('path:created', handlePathCreated);
+    return () => canvas.off('path:created', handlePathCreated);
+  }, [socket, mode]);
+
+  // Handle object modifications (when user moves/resizes in select mode)
+  useEffect(() => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !socket) return;
+
+    const handleObjectModified = (e: any) => {
+      const object = e.target;
+      if (!object || !object.id) return;
+
+      console.log('✏️ Object modified:', object.id);
+      
+      socket.emit('object-modified', {
+        id: object.id,
+        object: object.toObject(['id']),
+        timestamp: Date.now(),
+      });
+    };
+
+    canvas.on('object:modified', handleObjectModified);
+    return () => canvas.off('object:modified', handleObjectModified);
   }, [socket]);
 
-  // Listen for REMOTE object modifications
+  // Receive drawings from others
   useEffect(() => {
     if (!socket) return;
 
-    const handleRemoteObjectModified = (data: {
-      id: string;
-      object: any;
-      socketId: string;
-      timestamp: number;
-    }) => {
-      const fabricCanvas = fabricCanvasRef.current;
-      if (!fabricCanvas) return;
+    const handleRemoteDrawing = async (data: any) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) return;
 
-      console.log('👥 Remote object modified:', data.id);
+      console.log('📥 Received data:', data.object);
+      console.log('📥 Object ID:', data.object?.id);
+
+      // Skip if this is our own drawing echoing back
+      if (data.object?.id && localObjectIds.current.has(data.object.id)) {
+        console.log('⏭️ Skipping my own drawing');
+        return;
+      }
+
+      console.log('👥 Received remote drawing:', data.object?.id);
+
+      try {
+        // Convert JSON back to Fabric object
+        const objects = await fabric.util.enlivenObjects([data.object]);
+        if (objects.length > 0) {
+          const path = objects[0] as any;
+          
+          // Make sure ID is preserved
+          if (data.object.id) {
+            path.id = data.object.id;
+          }
+          
+          path.selectable = true;
+          path.evented = true;
+          
+          canvas.add(path);
+          canvas.renderAll();
+          
+          // Store remote objects so we can modify them later
+          if (path.id) {
+            remoteObjects.current.set(path.id, path);
+            console.log('✅ Stored remote object:', path.id);
+          }
+        }
+      } catch (error) {
+        console.error('❌ Error adding remote drawing:', error);
+      }
+    };
+
+    socket.on('remote-object-added', handleRemoteDrawing);
+    return () => socket.off('remote-object-added', handleRemoteDrawing);
+  }, [socket]);
+
+  // Receive object modifications from others
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleRemoteModification = (data: any) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) return;
 
       const remoteObj = remoteObjects.current.get(data.id);
       if (remoteObj) {
-        isLocalChange.current = true;
+        console.log('👥 Remote object modified:', data.id);
         
-        remoteObj.object.set({
+        remoteObj.set({
           left: data.object.left,
           top: data.object.top,
           scaleX: data.object.scaleX,
@@ -292,212 +282,93 @@ export default function Canvas({ socket }: CanvasProps) {
           angle: data.object.angle,
         });
         
-        fabricCanvas.renderAll();
-        
-        setTimeout(() => {
-          isLocalChange.current = false;
-        }, 0);
+        canvas.renderAll();
       }
     };
 
-    socket.on('remote-object-modified', handleRemoteObjectModified);
-
-    return () => {
-      socket.off('remote-object-modified', handleRemoteObjectModified);
-    };
+    socket.on('remote-object-modified', handleRemoteModification);
+    return () => socket.off('remote-object-modified', handleRemoteModification);
   }, [socket]);
 
-  // Listen for REMOTE object removals
+  // Receive object removals from others
   useEffect(() => {
     if (!socket) return;
 
-    const handleRemoteObjectRemoved = (data: { 
-      id: string; 
-      socketId: string; 
-      timestamp: number 
-    }) => {
-      const fabricCanvas = fabricCanvasRef.current;
-      if (!fabricCanvas) return;
+    const handleRemoteRemoval = (data: any) => {
+      const canvas = fabricCanvasRef.current;
+      if (!canvas) return;
 
       console.log('👥 Remote object removed:', data.id);
 
+      // Check if it's a local object being removed by someone else
+      const localObj = canvas.getObjects().find((obj: any) => obj.id === data.id);
+      if (localObj) {
+        canvas.remove(localObj);
+        localObjectIds.current.delete(data.id);
+        canvas.renderAll();
+        return;
+      }
+
+      // Check if it's a remote object
       const remoteObj = remoteObjects.current.get(data.id);
       if (remoteObj) {
-        isLocalChange.current = true;
-        
-        fabricCanvas.remove(remoteObj.object);
+        canvas.remove(remoteObj);
         remoteObjects.current.delete(data.id);
-        fabricCanvas.renderAll();
-        
-        setTimeout(() => {
-          isLocalChange.current = false;
-        }, 0);
+        canvas.renderAll();
       }
     };
 
-    socket.on('remote-object-removed', handleRemoteObjectRemoved);
-
-    return () => {
-      socket.off('remote-object-removed', handleRemoteObjectRemoved);
-    };
+    socket.on('remote-object-removed', handleRemoteRemoval);
+    return () => socket.off('remote-object-removed', handleRemoteRemoval);
   }, [socket]);
-
-  // Add rectangle
-  const addRectangle = () => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas || !socket) return;
-
-    const id = `rect-${Date.now()}-${Math.random()}`;
-    console.log('🎨 Adding rectangle:', id);
-
-    isLocalChange.current = true;
-
-    const rectangle = new fabric.Rect({
-      left: 100,
-      top: 100,
-      width: 100,
-      height: 80,
-      fill: '#FF6B6B',
-      id: id,
-    });
-
-    fabricCanvas.add(rectangle);
-    fabricCanvas.setActiveObject(rectangle);
-    fabricCanvas.renderAll();
-
-    const serialized = rectangle.toJSON();
-    socket.emit('object-added', {
-      object: serialized,
-      timestamp: Date.now(),
-    });
-
-    setTimeout(() => {
-      isLocalChange.current = false;
-    }, 0);
-  };
-
-  // Add circle
-  const addCircle = () => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas || !socket) return;
-
-    const id = `circle-${Date.now()}-${Math.random()}`;
-    console.log('🎨 Adding circle:', id);
-
-    isLocalChange.current = true;
-
-    const circle = new fabric.Circle({
-      left: 150,
-      top: 150,
-      radius: 50,
-      fill: '#4ECDC4',
-      id: id,
-    });
-
-    fabricCanvas.add(circle);
-    fabricCanvas.setActiveObject(circle);
-    fabricCanvas.renderAll();
-
-    const serialized = circle.toJSON();
-    socket.emit('object-added', {
-      object: serialized,
-      timestamp: Date.now(),
-    });
-
-    setTimeout(() => {
-      isLocalChange.current = false;
-    }, 0);
-  };
-
-  // Delete selected object
-  const deleteSelected = () => {
-    const fabricCanvas = fabricCanvasRef.current;
-    if (!fabricCanvas || !socket) return;
-
-    const activeObject = fabricCanvas.getActiveObject() as any;
-    if (activeObject && activeObject.id) {
-      console.log('🗑️ Deleting selected:', activeObject.id);
-      
-      socket.emit('object-removed', {
-        id: activeObject.id,
-        timestamp: Date.now(),
-      });
-      
-      isLocalChange.current = true;
-      fabricCanvas.remove(activeObject);
-      fabricCanvas.renderAll();
-      
-      setTimeout(() => {
-        isLocalChange.current = false;
-      }, 0);
-    }
-  };
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 flex-wrap">
-        {/* Drawing Mode Buttons */}
+      <div className="flex gap-2">
         <button
-          onClick={() => setDrawingMode('select')}
-          className={`px-4 py-2 rounded transition ${
-            drawingMode === 'select'
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
-          }`}
-        >
-          Select
-        </button>
-        <button
-          onClick={() => setDrawingMode('pen')}
-          className={`px-4 py-2 rounded transition ${
-            drawingMode === 'pen'
+          onClick={() => setMode('pen')}
+          className={`px-6 py-3 rounded-lg font-medium transition ${
+            mode === 'pen'
               ? 'bg-blue-600 text-white'
               : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
           }`}
         >
           ✏️ Pen
         </button>
+        
         <button
-          onClick={() => setDrawingMode('eraser')}
-          className={`px-4 py-2 rounded transition ${
-            drawingMode === 'eraser'
-              ? 'bg-blue-600 text-white'
+          onClick={() => setMode('eraser')}
+          className={`px-6 py-3 rounded-lg font-medium transition ${
+            mode === 'eraser'
+              ? 'bg-red-600 text-white'
               : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
           }`}
         >
           🗑️ Eraser
         </button>
-
-        <div className="w-full border-t"></div>
-
-        {/* Object Buttons */}
+        
         <button
-          onClick={addRectangle}
-          className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition"
+          onClick={() => setMode('select')}
+          className={`px-6 py-3 rounded-lg font-medium transition ${
+            mode === 'select'
+              ? 'bg-green-600 text-white'
+              : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
+          }`}
         >
-          Add Rectangle
+          👆 Select
         </button>
-        <button
-          onClick={addCircle}
-          className="px-4 py-2 bg-teal-500 text-white rounded hover:bg-teal-600 transition"
-        >
-          Add Circle
-        </button>
-        <button
-          onClick={deleteSelected}
-          className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition"
-        >
-          Delete Selected
-        </button>
-        <span className="text-sm text-gray-600 ml-auto self-center">
-          {drawingMode === 'pen' && 'Draw freely on canvas'}
-          {drawingMode === 'eraser' && 'Erase drawings'}
-          {drawingMode === 'select' && 'Click and drag to move • Press Delete to remove'}
+        
+        <span className="text-sm text-gray-600 self-center ml-auto">
+          {mode === 'pen' && 'Draw freely on the canvas'}
+          {mode === 'eraser' && 'Click on drawings to delete them'}
+          {mode === 'select' && 'Click and drag to move objects'}
         </span>
       </div>
+      
       <canvas
         ref={canvasRef}
-        className="border-2 border-gray-300 bg-white rounded cursor-crosshair"
+        className="border-4 border-gray-400 rounded-lg shadow-lg"
+        style={{ cursor: mode === 'select' ? 'default' : 'crosshair' }}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import  * as fabric from 'fabric';
 import { Socket } from 'socket.io-client';
 
@@ -15,8 +15,178 @@ export default function Canvas({ socket }: CanvasProps) {
   const remoteObjects = useRef<Map<string, any>>(new Map());
   const [mode, setMode] = useState<'pen' | 'eraser' | 'select'>('pen');
   const eraserCursorRef = useRef<fabric.Circle | null>(null);
+  
+  // Undo/Redo state
+  const historyRef = useRef<Array<{ action: string; data: any }>>([]);
+  const historyIndexRef = useRef(-1);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
 
-  // Initialize canvas
+  // Update undo/redo button states
+  const updateHistoryState = () => {
+    setCanUndo(historyIndexRef.current >= 0);
+    setCanRedo(historyIndexRef.current < historyRef.current.length - 1);
+  };
+
+  // Add action to history
+  const addToHistory = (action: string, data: any) => {
+    // Remove any redo history
+    historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
+    
+    // Add new action
+    historyRef.current.push({ action, data });
+    historyIndexRef.current++;
+    
+    // Limit history to 50 actions
+    if (historyRef.current.length > 50) {
+      historyRef.current.shift();
+      historyIndexRef.current--;
+    }
+    
+    updateHistoryState();
+  };
+
+  // Undo function
+  const handleUndo = useCallback(() => {
+    if (historyIndexRef.current < 0) return;
+    
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !socket) return;
+
+    const historyItem = historyRef.current[historyIndexRef.current];
+    
+    if (historyItem.action === 'add') {
+      // Undo add = remove object
+      const obj = canvas.getObjects().find((o: any) => o.id === historyItem.data.id);
+      if (obj) {
+        canvas.remove(obj);
+        canvas.renderAll();
+        
+        // Emit removal to other users
+        socket.emit('object-removed', {
+          id: historyItem.data.id,
+          timestamp: Date.now(),
+        });
+      }
+    } else if (historyItem.action === 'remove') {
+      // Undo remove = add object back
+      fabric.util.enlivenObjects([historyItem.data.object]).then((objects: any[]) => {
+        if (objects.length > 0) {
+          const obj = objects[0];
+          canvas.add(obj);
+          canvas.renderAll();
+          
+          // Emit addition to other users
+          socket.emit('object-added', {
+            object: historyItem.data.object,
+            timestamp: Date.now(),
+          });
+        }
+      });
+    } else if (historyItem.action === 'modify') {
+      // Undo modify = restore old state
+      const obj = canvas.getObjects().find((o: any) => o.id === historyItem.data.id);
+      if (obj) {
+        obj.set(historyItem.data.oldState);
+        canvas.renderAll();
+        
+        // Emit modification to other users
+        socket.emit('object-modified', {
+          id: historyItem.data.id,
+          object: obj.toObject(['id']),
+          timestamp: Date.now(),
+        });
+      }
+    }
+    
+    historyIndexRef.current--;
+    updateHistoryState();
+  }, [socket]);
+
+  // Redo function
+  const handleRedo = useCallback(() => {
+    if (historyIndexRef.current >= historyRef.current.length - 1) return;
+    
+    const canvas = fabricCanvasRef.current;
+    if (!canvas || !socket) return;
+
+    historyIndexRef.current++;
+    const historyItem = historyRef.current[historyIndexRef.current];
+    
+    if (historyItem.action === 'add') {
+      // Redo add = add object
+      fabric.util.enlivenObjects([historyItem.data.object]).then((objects: any[]) => {
+        if (objects.length > 0) {
+          const obj = objects[0];
+          canvas.add(obj);
+          canvas.renderAll();
+          
+          // Emit addition to other users
+          socket.emit('object-added', {
+            object: historyItem.data.object,
+            timestamp: Date.now(),
+          });
+        }
+      });
+    } else if (historyItem.action === 'remove') {
+      // Redo remove = remove object
+      const obj = canvas.getObjects().find((o: any) => o.id === historyItem.data.id);
+      if (obj) {
+        canvas.remove(obj);
+        canvas.renderAll();
+        
+        // Emit removal to other users
+        socket.emit('object-removed', {
+          id: historyItem.data.id,
+          timestamp: Date.now(),
+        });
+      }
+    } else if (historyItem.action === 'modify') {
+      // Redo modify = apply new state
+      const obj = canvas.getObjects().find((o: any) => o.id === historyItem.data.id);
+      if (obj) {
+        obj.set(historyItem.data.newState);
+        canvas.renderAll();
+        
+        // Emit modification to other users
+        socket.emit('object-modified', {
+          id: historyItem.data.id,
+          object: obj.toObject(['id']),
+          timestamp: Date.now(),
+        });
+      }
+    }
+    
+    updateHistoryState();
+  }, [socket]);
+
+  // Keyboard shortcuts for undo/redo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Undo: Ctrl+Z (or Cmd+Z on Mac)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+        return;
+      }
+      
+      // Redo: Ctrl+Y or Ctrl+Shift+Z (or Cmd+Y / Cmd+Shift+Z on Mac)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+      
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleUndo, handleRedo]);
   useEffect(() => {
     if (!canvasRef.current) return;
 
@@ -154,6 +324,9 @@ export default function Canvas({ socket }: CanvasProps) {
         if (isInBounds) {
           console.log('🗑️ Erasing object:', objWithId.id);
           
+          // Store object data for undo
+          const objectData = obj.toObject(['id']);
+          
           // Remove from canvas
           canvas.remove(obj);
           
@@ -169,6 +342,12 @@ export default function Canvas({ socket }: CanvasProps) {
             localObjectIds.current.delete(objWithId.id);
             remoteObjects.current.delete(objWithId.id);
           }
+          
+          // Add to history
+          addToHistory('remove', {
+            id: objWithId.id,
+            object: objectData,
+          });
           
           canvas.renderAll();
           break; // Only erase one object per click
@@ -214,6 +393,12 @@ export default function Canvas({ socket }: CanvasProps) {
         object: pathData,
         timestamp: Date.now(),
       });
+      
+      // Add to history
+      addToHistory('add', {
+        id: pathId,
+        object: pathData,
+      });
     };
 
     canvas.on('path:created', handlePathCreated);
@@ -224,6 +409,24 @@ export default function Canvas({ socket }: CanvasProps) {
   useEffect(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas || !socket) return;
+
+    let objectStateBeforeModify: any = null;
+
+    const handleObjectModifying = (e: any) => {
+      const object = e.target;
+      if (!object || !object.id) return;
+      
+      // Store state before modification (only once per modification)
+      if (!objectStateBeforeModify) {
+        objectStateBeforeModify = {
+          left: object.left,
+          top: object.top,
+          scaleX: object.scaleX,
+          scaleY: object.scaleY,
+          angle: object.angle,
+        };
+      }
+    };
 
     const handleObjectModified = (e: any) => {
       const object = e.target;
@@ -236,10 +439,35 @@ export default function Canvas({ socket }: CanvasProps) {
         object: object.toObject(['id']),
         timestamp: Date.now(),
       });
+      
+      // Add to history
+      if (objectStateBeforeModify) {
+        addToHistory('modify', {
+          id: object.id,
+          oldState: objectStateBeforeModify,
+          newState: {
+            left: object.left,
+            top: object.top,
+            scaleX: object.scaleX,
+            scaleY: object.scaleY,
+            angle: object.angle,
+          },
+        });
+        objectStateBeforeModify = null;
+      }
     };
 
+    canvas.on('object:moving', handleObjectModifying);
+    canvas.on('object:scaling', handleObjectModifying);
+    canvas.on('object:rotating', handleObjectModifying);
     canvas.on('object:modified', handleObjectModified);
-    return () => canvas.off('object:modified', handleObjectModified);
+    
+    return () => {
+      canvas.off('object:moving', handleObjectModifying);
+      canvas.off('object:scaling', handleObjectModifying);
+      canvas.off('object:rotating', handleObjectModifying);
+      canvas.off('object:modified', handleObjectModified);
+    };
   }, [socket]);
 
   // Receive drawings from others
@@ -355,7 +583,7 @@ export default function Canvas({ socket }: CanvasProps) {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center">
+      <div className="flex gap-2 items-center flex-wrap">
         <button
           onClick={() => setMode('pen')}
           className={`px-6 py-3 rounded-lg font-medium transition ${
@@ -387,6 +615,34 @@ export default function Canvas({ socket }: CanvasProps) {
           }`}
         >
           👆 Select
+        </button>
+        
+        <div className="w-px h-8 bg-gray-300"></div>
+        
+        <button
+          onClick={handleUndo}
+          disabled={!canUndo}
+          className={`px-4 py-3 rounded-lg font-medium transition ${
+            canUndo
+              ? 'bg-purple-600 text-white hover:bg-purple-700'
+              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+          }`}
+          title="Undo (Ctrl+Z)"
+        >
+          ↶ Undo
+        </button>
+        
+        <button
+          onClick={handleRedo}
+          disabled={!canRedo}
+          className={`px-4 py-3 rounded-lg font-medium transition ${
+            canRedo
+              ? 'bg-purple-600 text-white hover:bg-purple-700'
+              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+          }`}
+          title="Redo (Ctrl+Y)"
+        >
+          ↷ Redo
         </button>
         
         <span className="text-sm text-gray-600 self-center ml-auto">

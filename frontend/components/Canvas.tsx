@@ -62,6 +62,17 @@ export default function Canvas({ socket }: CanvasProps) {
       canvas.isDrawingMode = false;
       canvas.selection = false;
       
+      // Disable selection completely in eraser mode
+      canvas.discardActiveObject();
+      
+      // Make all objects non-selectable in eraser mode
+      canvas.forEachObject((obj: any) => {
+        if (obj !== eraserCursorRef.current) {
+          obj.selectable = false;
+          obj.hoverCursor = 'crosshair';
+        }
+      });
+      
       // Create eraser cursor (visual indicator)
       const eraserCursor = new fabric.Circle({
         radius: 10,
@@ -81,13 +92,22 @@ export default function Canvas({ socket }: CanvasProps) {
     } else {
       canvas.isDrawingMode = false;
       canvas.selection = true;
+      
+      // Make all objects selectable in select mode
+      canvas.forEachObject((obj: any) => {
+        if (obj !== eraserCursorRef.current) {
+          obj.selectable = true;
+          obj.evented = true;
+        }
+      });
+      
       console.log('👆 Selection mode');
     }
     
     canvas.renderAll();
   }, [mode]);
 
-  // Eraser: delete objects on mouse move
+  // Eraser: delete objects on click
   useEffect(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas || mode !== 'eraser') return;
@@ -108,25 +128,36 @@ export default function Canvas({ socket }: CanvasProps) {
     const handleMouseDown = (e: any) => {
       const pointer = canvas.getPointer(e.e);
       
-      // Find objects under the eraser
-      const objects = canvas.getObjects();
+      // Find and delete object under the eraser immediately
+      const objects = canvas.getObjects().slice().reverse();
+      
       for (const obj of objects) {
         const objWithId = obj as any;
         
         // Skip the eraser cursor itself
         if (obj === eraserCursorRef.current) continue;
         
-        // Check if pointer is inside this object
-        if (obj.containsPoint(pointer)) {
+        // Skip objects without IDs
+        if (!objWithId.id) continue;
+        
+        // Get the bounding rect with absolute coordinates
+        const boundingRect = obj.getBoundingRect(true, true);
+        
+        // Expand the hit area for easier selection
+        const hitMargin = 15;
+        const isInBounds = 
+          pointer.x >= boundingRect.left - hitMargin &&
+          pointer.x <= boundingRect.left + boundingRect.width + hitMargin &&
+          pointer.y >= boundingRect.top - hitMargin &&
+          pointer.y <= boundingRect.top + boundingRect.height + hitMargin;
+        
+        if (isInBounds) {
           console.log('🗑️ Erasing object:', objWithId.id);
-          console.log('🗑️ Is local?', localObjectIds.current.has(objWithId.id));
-          console.log('🗑️ Is remote?', remoteObjects.current.has(objWithId.id));
-          console.log('🗑️ Socket connected?', socket?.connected);
           
           // Remove from canvas
           canvas.remove(obj);
           
-          // Always emit deletion if object has an ID and socket is connected
+          // Emit deletion if object has an ID and socket is connected
           if (objWithId.id && socket?.connected) {
             console.log('🗑️ Emitting object-removed:', objWithId.id);
             socket.emit('object-removed', {
@@ -324,7 +355,7 @@ export default function Canvas({ socket }: CanvasProps) {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2">
+      <div className="flex gap-2 items-center">
         <button
           onClick={() => setMode('pen')}
           className={`px-6 py-3 rounded-lg font-medium transition ${
@@ -344,7 +375,7 @@ export default function Canvas({ socket }: CanvasProps) {
               : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
           }`}
         >
-          🗑️ Eraser
+          🗑️ Eraser (Click to delete)
         </button>
         
         <button
@@ -360,7 +391,7 @@ export default function Canvas({ socket }: CanvasProps) {
         
         <span className="text-sm text-gray-600 self-center ml-auto">
           {mode === 'pen' && 'Draw freely on the canvas'}
-          {mode === 'eraser' && 'Click on drawings to delete them'}
+          {mode === 'eraser' && 'Click on any drawing to delete it'}
           {mode === 'select' && 'Click and drag to move objects'}
         </span>
       </div>
